@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pendulum Lab · Remote Control</title>
+  <meta name="color-scheme" content="light dark">
+  <!-- Geist + Geist Mono (self-hosted builds via Fontsource), Phosphor icons -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/geist-sans@5/latin.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/geist-mono@5/latin.css">
+  <script src="https://unpkg.com/@phosphor-icons/web@2.1.1"></script>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <i class="ph ph-wave-sine" aria-hidden="true"></i>
+      <span>Pendulum Lab</span>
+    </div>
+    <div class="topbar-status">
+      <span class="conn" id="conn" data-state="connecting">
+        <i class="ph ph-plugs" aria-hidden="true"></i><span id="connText">Connecting</span>
+      </span>
+      <span class="viewers" id="viewers" title="People connected">
+        <i class="ph ph-users" aria-hidden="true"></i><span id="viewerCount">0</span>
+      </span>
+    </div>
+    <div class="control-owner">
+      <span id="ownerText" class="owner-text">Viewing</span>
+      <button class="btn btn-quiet" id="controlBtn" type="button">Take control</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- Rig: state, live view, start / stop -->
+    <section class="panel rig" aria-labelledby="stateLabel">
+      <div class="rig-head">
+        <div>
+          <h1 class="state" id="stateLabel" data-state="OFFLINE">Rig offline</h1>
+          <p class="state-help" id="stateHelp">Waiting for the bridge to find the motor board.</p>
+        </div>
+        <div class="rig-actions">
+          <button class="btn btn-primary" id="startBtn" type="button" disabled>
+            <i class="ph ph-play" aria-hidden="true"></i>Start
+          </button>
+          <button class="btn btn-stop" id="stopBtn" type="button" disabled>
+            <i class="ph ph-stop" aria-hidden="true"></i>Stop
+          </button>
+        </div>
+      </div>
+
+      <div class="viz-wrap">
+        <canvas id="viz" aria-label="Live view of the cart and pendulum" role="img"></canvas>
+        <div class="viz-empty" id="vizEmpty">
+          <i class="ph ph-cell-signal-slash" aria-hidden="true"></i>
+          <p>No live data yet. Start a run to see the cart and pendulum move.</p>
+        </div>
+      </div>
+
+      <dl class="readouts">
+        <div><dt>Angle from upright</dt><dd><span id="roAngle">-</span><small>deg</small></dd></div>
+        <div><dt>Cart position</dt><dd><span id="roX">-</span><small>mm</small></dd></div>
+        <div><dt id="roExtraLabel">Swing energy</dt><dd><span id="roExtra">-</span><small id="roExtraUnit"></small></dd></div>
+      </dl>
+    </section>
+
+    <!-- Parameters -->
+    <section class="panel params" aria-labelledby="paramsTitle">
+      <div class="params-head">
+        <h2 id="paramsTitle">Parameters</h2>
+        <p class="params-note" id="paramsNote">Take control to change settings. Changes apply while the rig is idle.</p>
+      </div>
+
+      <div id="paramsBody" class="params-body" aria-busy="true">
+        <div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>
+        <div class="skeleton"></div><div class="skeleton short"></div>
+      </div>
+
+      <div class="params-actions">
+        <button class="btn btn-primary" id="applyBtn" type="button" disabled>Apply changes</button>
+        <button class="btn btn-quiet" id="defaultsBtn" type="button" disabled>Restore defaults</button>
+      </div>
+    </section>
+
+    <!-- Live charts -->
+    <section class="panel charts" aria-label="Live charts">
+      <div class="chart">
+        <div class="chart-head"><h3>Pendulum angle</h3><span class="chart-range">last 20 s, deg from upright</span></div>
+        <canvas id="chartAngle"></canvas>
+      </div>
+      <div class="chart">
+        <div class="chart-head"><h3>Cart position</h3><span class="chart-range">last 20 s, mm from centre</span></div>
+        <canvas id="chartX"></canvas>
+      </div>
+    </section>
+
+    <!-- Event log -->
+    <section class="panel events" aria-labelledby="eventsTitle">
+      <h2 id="eventsTitle">Activity</h2>
+      <ol class="event-list" id="eventList" aria-live="polite">
+        <li class="event-empty">Nothing yet. Events from the rig show up here.</li>
+      </ol>
+    </section>
+  </main>
+
+  <dialog id="startDialog" class="dialog">
+    <form method="dialog">
+      <h2>Start a run?</h2>
+      <p>The cart will home to both ends, then swing the pendulum up and balance it without further input. Make sure the track is clear.</p>
+      <div class="dialog-actions">
+        <button class="btn btn-quiet" value="cancel" type="submit">Cancel</button>
+        <button class="btn btn-primary" value="start" type="submit" id="confirmStart">Start run</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="defaultsDialog" class="dialog">
+    <form method="dialog">
+      <h2>Restore defaults?</h2>
+      <p>Every parameter goes back to the tested values in the firmware.</p>
+      <div class="dialog-actions">
+        <button class="btn btn-quiet" value="cancel" type="submit">Cancel</button>
+        <button class="btn btn-primary" value="ok" type="submit">Restore</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="toasts" id="toasts" aria-live="assertive"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
