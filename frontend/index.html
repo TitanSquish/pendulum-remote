@@ -37,7 +37,7 @@
       <div class="rig-head">
         <div>
           <h1 class="state" id="stateLabel" data-state="OFFLINE">Rig offline</h1>
-          <p class="state-help" id="stateHelp">Waiting for the bridge to find the motor board.</p>
+          <p class="state-help" id="stateHelp">Waiting for the bridge to find the rig.</p>
         </div>
         <div class="rig-actions">
           <button class="btn btn-primary" id="startBtn" type="button" disabled>
@@ -60,12 +60,18 @@
       <dl class="readouts">
         <div><dt>Angle from upright</dt><dd><span id="roAngle">-</span><small>deg</small></dd></div>
         <div><dt>Cart position</dt><dd><span id="roX">-</span><small>mm</small></dd></div>
-        <div><dt id="roExtraLabel">Swing energy</dt><dd><span id="roExtra">-</span><small id="roExtraUnit"></small></dd></div>
+        <div><dt id="roExtraLabel">Motor command</dt><dd><span id="roExtra">-</span><small id="roExtraUnit">V</small></dd></div>
       </dl>
     </section>
 
-    <!-- Parameters -->
+    <!-- Experiment + parameters -->
     <section class="panel params" aria-labelledby="paramsTitle">
+      <div class="exp-picker">
+        <label for="expSelect">Experiment</label>
+        <select id="expSelect" disabled><option>Waiting for the rig</option></select>
+        <p class="exp-desc" id="expDesc"></p>
+      </div>
+
       <div class="params-head">
         <h2 id="paramsTitle">Parameters</h2>
         <p class="params-note" id="paramsNote">Take control to change settings. Changes apply while the rig is idle.</p>
@@ -89,8 +95,12 @@
         <canvas id="chartAngle"></canvas>
       </div>
       <div class="chart">
-        <div class="chart-head"><h3>Cart position</h3><span class="chart-range">last 20 s, mm from centre</span></div>
+        <div class="chart-head"><h3>Cart position</h3><span class="chart-range">last 20 s, mm from centre, dashed = setpoint</span></div>
         <canvas id="chartX"></canvas>
+      </div>
+      <div class="chart">
+        <div class="chart-head"><h3>Motor command</h3><span class="chart-range">last 20 s, volts (2.5 = full power)</span></div>
+        <canvas id="chartU"></canvas>
       </div>
     </section>
 
@@ -101,12 +111,23 @@
         <li class="event-empty">Nothing yet. Events from the rig show up here.</li>
       </ol>
     </section>
+
+    <!-- Saved runs -->
+    <section class="panel runs" aria-labelledby="runsTitle">
+      <div class="runs-head">
+        <h2 id="runsTitle">Runs</h2>
+        <p class="params-note">Every finished run is saved on the bridge PC. In MATLAB, <code>load</code> the .mat file: it holds t, x, theta, u, ref and simout.</p>
+      </div>
+      <ol class="run-list" id="runList">
+        <li class="run-empty">No runs yet.</li>
+      </ol>
+    </section>
   </main>
 
   <dialog id="startDialog" class="dialog">
     <form method="dialog">
       <h2>Start a run?</h2>
-      <p>The cart will home to both ends, then swing the pendulum up and balance it without further input. Make sure the track is clear.</p>
+      <p id="startText">The cart will home to both ends, then run the selected experiment. Make sure the track is clear.</p>
       <div class="dialog-actions">
         <button class="btn btn-quiet" value="cancel" type="submit">Cancel</button>
         <button class="btn btn-primary" value="start" type="submit" id="confirmStart">Start run</button>

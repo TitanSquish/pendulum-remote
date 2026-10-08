@@ -2,24 +2,43 @@
 "use strict";
 
 // ---------------------------------------------------------------- constants
-const TRACK_HALF_MM = 470;          // limit switch to centre (homing: 12,405 counts)
+const TRACK_HALF_MM = 470;          // limit switch to centre (homing: ~12,500 counts)
 const SOFT_LIMIT_MM = 0.85 * TRACK_HALF_MM;
 const CHART_SECONDS = 20;
 
 const STATES = {
-  OFFLINE: ["Rig offline", "Waiting for the bridge to find the motor board."],
-  IDLE:    ["Ready", "Press Start to home the cart, swing the pendulum up and balance it."],
+  OFFLINE: ["Rig offline", "Waiting for the bridge to find the rig."],
+  IDLE:    ["Ready", "Pick an experiment, then press Start. Every run homes the cart first."],
   HOMING:  ["Homing", "Finding both ends of the track, then centring the cart."],
-  HANG:    ["Settling", "Measuring where the pendulum hangs at rest."],
+  HANG:    ["Settling", "Measuring where the pendulum hangs at rest before the run starts."],
   SWING:   ["Swinging up", "Pumping energy into the pendulum to bring it to the top."],
   BALANCE: ["Balancing", "Holding the pendulum upright and the cart near the centre."],
   BRAKE:   ["Braking", "The cart reached the software limit and is stopping."],
   STEP:    ["Step test", "Moving the cart back and forth to test the speed loop."],
-  CHECK:   ["Sign check", "Motor off. Angle and position are shown for checking."],
+  CHECK:   ["Sign check", "Motor off. Move the cart and pendulum by hand and check the readings."],
   DONE:    ["Test finished", "Motor off."],
   DAC:     ["Pi control", "The Raspberry Pi is driving the motor."],
 };
-const RUNNING = new Set(["HOMING", "HANG", "SWING", "BALANCE", "BRAKE", "STEP", "CHECK", "DONE", "DAC"]);
+
+// Picker groups, in the order of the Feedback manual. Names must match the
+// firmware's experiment names; anything else lands in "Other".
+const EXP_GROUPS = [
+  { title: "Swing-up & balance", names: ["SwingBal"] },
+  { title: "Identification", names: ["FreeSwing", "Friction", "CartIdent", "CraneIdent", "InvPendIdent"] },
+  { title: "Control", names: ["CartPID", "SwingUp", "PendStab", "CraneCtl"] },
+  { title: "Combined", names: ["SwingHold", "UpDown"] },
+  { title: "Rig checks", names: ["SignCheck", "StepTest"] },
+];
+// [description under the picker, what will move (start dialog)]
+const EXP_INFO = {
+  SwingBal: ["Swings the pendulum up from hanging and balances it upright.",
+             "The cart will home to both ends, then swing the pendulum up and balance it without further input. Make sure the track is clear."],
+  SignCheck: ["Motor off after homing. Shows angle and position so the sign conventions can be checked by hand.",
+              "The cart will home to both ends, then the motor turns off. Move the cart and pendulum by hand and check the readings."],
+  StepTest: ["Moves the cart back and forth at a fixed speed to test the speed loop.",
+             "The cart will home to both ends, then move about 18 cm each way, three times, and stop."],
+};
+const DEFAULT_START_TEXT = "The cart will home to both ends, then run the selected experiment. Make sure the track is clear.";
 
 const GROUPS = [
   { title: "Balance", names: ["BAL_MODE", "BAL_POLE", "BAL_K_TH", "BAL_K_THD", "BAL_K_X", "BAL_K_V",
@@ -74,26 +93,31 @@ const app = {
   connected: false,
   role: "free",          // "you" | "other" | "free"
   state: "OFFLINE",
-  params: [],            // from the board
+  params: [],            // from the board (shared + the selected experiment's)
   pending: {},           // name -> value typed but not applied
   errors: {},            // name -> message
-  samples: [],           // {t, th, x}
+  experiments: [],       // [{name, title}] from the board
+  exp: "",               // selected experiment
+  runs: [],              // run summaries, newest first
+  samples: [],           // {t, th, x, u, ref} from the 50 Hz D telemetry
   pose: { th: 180, x: 0, has: false },
-  extra: null,
 };
 
 const $ = (id) => document.getElementById(id);
 
+function tokenQuery() {
+  const token = new URLSearchParams(location.search).get("token");
+  return token ? `?token=${encodeURIComponent(token)}` : "";
+}
+
 // ---------------------------------------------------------------- connection
 let retryMs = 500;
 function connect() {
-  const token = new URLSearchParams(location.search).get("token");
-  const url = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws` +
-              (token ? `?token=${encodeURIComponent(token)}` : "");
+  const url = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws` + tokenQuery();
   setConn("connecting", "Connecting");
   const ws = new WebSocket(url);
   app.ws = ws;
-  ws.onopen = () => { app.connected = true; retryMs = 500; setConn("ok", "Connected"); render(); };
+  ws.onopen = () => { app.connected = true; retryMs = 500; setConn("ok", "Connected"); loadRuns(); render(); };
   ws.onmessage = (e) => { try { onMessage(JSON.parse(e.data)); } catch (err) { console.error(err); } };
   ws.onclose = (e) => {
     app.connected = false;
@@ -121,6 +145,9 @@ function onMessage(m) {
     case "hello":
       app.role = m.control;
       setState(m.state, true);
+      app.experiments = m.experiments || [];
+      app.exp = m.exp || "";
+      renderPicker();
       if (m.params && m.params.length) setParams(m.params);
       else send({ cmd: "params" });             // bridge hasn't got them yet: ask
       $("viewerCount").textContent = m.clients;
@@ -134,6 +161,24 @@ function onMessage(m) {
       break;
     case "params":
       setParams(m.params);
+      break;
+    case "experiments":
+      app.experiments = m.experiments;
+      renderPicker();
+      break;
+    case "exp":
+      app.exp = m.name;
+      app.pending = {};
+      app.errors = {};
+      renderPicker();
+      break;
+    case "run_start":
+      app.samples = [];
+      addEvent(`Run started: ${titleOf(m.name)}`);
+      break;
+    case "run_end":
+      addRun(m);
+      addEvent(`Run ended (${m.reason}): ${titleOf(m.name)}`, ["done", "stop"].includes(m.reason) ? "" : "bad");
       break;
     case "telemetry":
       onTelemetry(m);
@@ -181,22 +226,24 @@ function onReply(m) {
   else if (name === "defaults") toast("Defaults restored");
 }
 
+function setExtra(label, value, unit) {
+  $("roExtraLabel").textContent = label;
+  $("roExtra").textContent = value;
+  $("roExtraUnit").textContent = unit;
+}
+
 function onTelemetry(m) {
   const now = performance.now() / 1000;
-  if (m.mode === "SWING" || m.mode === "BAL") {
+  if (m.mode === "D") {
     app.pose = { th: m.th_deg, x: m.x_mm, has: true };
-    app.samples.push({ t: now, th: m.th_deg, x: m.x_mm });
+    app.samples.push({ t: now, th: m.th_deg, x: m.x_mm, u: m.u, ref: m.ref_mm });
     $("roAngle").textContent = m.th_deg.toFixed(1);
     $("roX").textContent = m.x_mm.toFixed(0);
-    if (m.mode === "SWING") {
-      $("roExtraLabel").textContent = "Swing energy";
-      $("roExtra").textContent = m.Eend.toFixed(2);
-      $("roExtraUnit").textContent = "of 0";
-    } else {
-      $("roExtraLabel").textContent = "Upright trim";
-      $("roExtra").textContent = m.trim_deg.toFixed(2);
-      $("roExtraUnit").textContent = "deg";
-    }
+    if (app.exp !== "SwingBal") setExtra("Motor command", m.u.toFixed(2), "V");
+  } else if (m.mode === "SWING") {
+    setExtra("Swing energy", m.Eend.toFixed(2), "of 0");
+  } else if (m.mode === "BAL") {
+    setExtra("Upright trim", m.trim_deg.toFixed(2), "deg");
   } else if (m.mode === "HANG") {
     app.pose = { th: 180, x: 0, has: true };
   }
@@ -214,10 +261,10 @@ function render() {
   st.textContent = app.connected ? label : "Not connected";
   st.dataset.state = app.connected ? app.state : "OFFLINE";
   $("stateHelp").textContent = !app.connected ? "Trying to reach the bridge on this computer."
-    : app.state === "IDLE" && app.role !== "you" ? "Take control to start a run." : help;
+    : app.state === "IDLE" && app.role !== "you" ? "Take control to pick an experiment and start a run." : help;
 
   const online = app.connected && app.state !== "OFFLINE";
-  $("startBtn").disabled = !(online && app.role === "you" && app.state === "IDLE");
+  $("startBtn").disabled = !(online && app.role === "you" && app.state === "IDLE" && app.exp);
   $("stopBtn").disabled = !online;          // anyone connected can stop
 
   const cb = $("controlBtn");
@@ -226,6 +273,7 @@ function render() {
   else { cb.textContent = "Take control"; $("ownerText").textContent = "Viewing"; }
   cb.disabled = !app.connected || app.role === "other";
 
+  $("expSelect").disabled = !canEdit() || !app.experiments.length;
   $("paramsNote").textContent =
     app.role !== "you" ? "Take control to change settings. Changes apply while the rig is idle."
     : app.state !== "IDLE" ? "Settings are locked while the rig is running. Stop it to make changes."
@@ -234,6 +282,41 @@ function render() {
   $("defaultsBtn").disabled = !canEdit();
   document.querySelectorAll("#paramsBody input, #paramsBody .segmented button")
     .forEach((el) => { el.disabled = !canEdit(); });
+}
+
+function titleOf(name) {
+  const e = app.experiments.find((x) => x.name === name);
+  return e ? e.title : name;
+}
+
+function renderPicker() {
+  const sel = $("expSelect");
+  sel.innerHTML = "";
+  if (!app.experiments.length) {
+    const o = document.createElement("option");
+    o.textContent = "Waiting for the rig";
+    sel.appendChild(o);
+    $("expDesc").textContent = "";
+    return;
+  }
+  const placed = new Set();
+  const addGroup = (title, list) => {
+    if (!list.length) return;
+    const og = document.createElement("optgroup");
+    og.label = title;
+    for (const e of list) {
+      const o = document.createElement("option");
+      o.value = e.name;
+      o.textContent = e.title;
+      og.appendChild(o);
+      placed.add(e.name);
+    }
+    sel.appendChild(og);
+  };
+  for (const g of EXP_GROUPS) addGroup(g.title, app.experiments.filter((e) => g.names.includes(e.name)));
+  addGroup("Other", app.experiments.filter((e) => !placed.has(e.name)));
+  sel.value = app.exp;
+  $("expDesc").textContent = (EXP_INFO[app.exp] || [""])[0];
 }
 
 function valueOf(name) {
@@ -253,21 +336,22 @@ function renderParams() {
   body.removeAttribute("aria-busy");
   const manual = valueOf("BAL_MODE") >= 0.5;
   const byName = Object.fromEntries(app.params.map((p) => [p.name, p]));
+  const known = new Set(GROUPS.flatMap((g) => g.names));
+  // Settings the console has no group for (new experiments) come first
+  const groups = [{ title: "Experiment settings", names: app.params.map((p) => p.name).filter((n) => !known.has(n)) },
+                  ...GROUPS];
   const focusedId = document.activeElement && document.activeElement.id;
   body.innerHTML = "";
 
-  for (const g of GROUPS) {
+  for (const g of groups) {
+    const items = g.names.map((n) => byName[n]).filter((p) => p
+      && !(manual && POLE_ONLY.has(p.name)) && !(!manual && MANUAL_ONLY.has(p.name)));
+    if (!items.length) continue;
     const sec = document.createElement("div");
     sec.className = "group";
     sec.innerHTML = `<h3>${g.title}</h3><div class="group-fields"></div>`;
     const fields = sec.querySelector(".group-fields");
-    for (const name of g.names) {
-      const p = byName[name];
-      if (!p) continue;
-      if (manual && POLE_ONLY.has(name)) continue;
-      if (!manual && MANUAL_ONLY.has(name)) continue;
-      fields.appendChild(name === "BAL_MODE" ? modeField(p) : numberField(p));
-    }
+    for (const p of items) fields.appendChild(p.name === "BAL_MODE" ? modeField(p) : numberField(p));
     body.appendChild(sec);
   }
   if (focusedId) { const el = $(focusedId); if (el) el.focus(); }
@@ -328,13 +412,69 @@ function setPending(p, v) {
 function capitalise(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : ""; }
 function clean(s) { return s.replace(/[—–]/g, "-"); }   // no em/en dashes in the UI
 
+// ---------------------------------------------------------------- runs
+async function loadRuns() {
+  try {
+    const res = await fetch("/runs" + tokenQuery());
+    if (!res.ok) return;
+    app.runs = await res.json();
+    renderRuns();
+  } catch (e) {
+    // Bridge not reachable yet: the next WebSocket reconnect loads them again
+  }
+}
+
+function addRun(r) {
+  app.runs.unshift(r);
+  renderRuns();
+}
+
+function fileUrl(f) { return `/runs/${encodeURIComponent(f)}` + tokenQuery(); }
+
+function renderRuns() {
+  const list = $("runList");
+  list.innerHTML = "";
+  if (!app.runs.length) {
+    list.innerHTML = '<li class="run-empty">No runs yet.</li>';
+    return;
+  }
+  for (const r of app.runs.slice(0, 50)) {
+    const li = document.createElement("li");
+    li.innerHTML = '<span class="run-title"></span><span class="run-files"></span><span class="run-meta"></span>';
+    li.querySelector(".run-title").textContent = titleOf(r.name);
+    const when = new Date(r.started * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    const results = Object.entries(r.results || {}).map(([k, v]) => `${k} ${fmt(v)}`).join(", ");
+    const meta = li.querySelector(".run-meta");
+    meta.textContent = `${when} · ${r.duration.toFixed(1)} s · ${r.reason}${results ? " · " + results : ""}`;
+    if (!["done", "stop"].includes(r.reason)) meta.dataset.tone = "bad";
+    const files = li.querySelector(".run-files");
+    for (const [kind, f] of Object.entries(r.files || {})) {
+      const a = document.createElement("a");
+      a.href = fileUrl(f);
+      a.download = f;
+      a.textContent = kind === "mat" ? ".mat" : "CSV";
+      a.setAttribute("aria-label", `Download ${titleOf(r.name)} run as ${a.textContent}`);
+      files.appendChild(a);
+    }
+    list.appendChild(li);
+  }
+}
+
 // ---------------------------------------------------------------- actions
 $("controlBtn").addEventListener("click", () => send({ cmd: app.role === "you" ? "release" : "claim" }));
-$("startBtn").addEventListener("click", () => $("startDialog").showModal());
+$("startBtn").addEventListener("click", () => {
+  $("startText").textContent = (EXP_INFO[app.exp] || [])[1] || DEFAULT_START_TEXT;
+  $("startDialog").showModal();
+});
 $("startDialog").addEventListener("close", () => {
   if ($("startDialog").returnValue === "start") send({ cmd: "start" });
 });
 $("stopBtn").addEventListener("click", () => send({ cmd: "stop" }));
+$("expSelect").addEventListener("change", (e) => {
+  const name = e.target.value;
+  e.target.value = app.exp;                     // stay on the board's choice until it confirms
+  if (name && name !== app.exp) send({ cmd: "select", name });
+});
 $("defaultsBtn").addEventListener("click", () => $("defaultsDialog").showModal());
 $("defaultsDialog").addEventListener("close", () => {
   if ($("defaultsDialog").returnValue === "ok") { app.pending = {}; app.errors = {}; send({ cmd: "defaults" }); }
@@ -449,13 +589,21 @@ function roundRect(ctx, x, y, w, h, r) {
 
 function niceScale(maxAbs, steps) { return steps.find((s) => maxAbs <= s) || steps[steps.length - 1]; }
 
-function drawChart(canvas, key, steps, color) {
+// Plots app.samples[key] over the last CHART_SECONDS; refKey (optional) is drawn dashed
+function drawChart(canvas, key, steps, color, refKey) {
   const { ctx, w, h } = fitCanvas(canvas);
   ctx.clearRect(0, 0, w, h);
   const left = 40, right = 6, top = 6, bottom = 6;
   const pw = w - left - right, ph = h - top - bottom;
   const data = app.samples;
-  const maxAbs = data.reduce((m, s) => Math.max(m, Math.abs(s[key])), 0);
+  const val = (s, k) => (typeof s[k] === "number" ? s[k] : NaN);
+  let maxAbs = 0;
+  for (const s of data) {
+    for (const k of refKey ? [key, refKey] : [key]) {
+      const v = val(s, k);
+      if (!Number.isNaN(v)) maxAbs = Math.max(maxAbs, Math.abs(v));
+    }
+  }
   const range = niceScale(maxAbs, steps);
   const y = (v) => top + ph / 2 - (v / range) * (ph / 2);
 
@@ -472,25 +620,35 @@ function drawChart(canvas, key, steps, color) {
   }
   const tEnd = performance.now() / 1000;
   const xAt = (t) => left + pw * (1 - (tEnd - t) / CHART_SECONDS);
-  ctx.strokeStyle = color; ctx.lineWidth = 1.75; ctx.lineJoin = "round";
-  ctx.beginPath();
-  data.forEach((s, i) => {
-    const vx = xAt(s.t), vy = y(Math.max(-range, Math.min(range, s[key])));
-    if (i === 0) ctx.moveTo(vx, vy);
-    else if (key === "th" && Math.abs(s.th - data[i - 1].th) > 180) ctx.moveTo(vx, vy);  // wrap at +-180
-    else ctx.lineTo(vx, vy);
-  });
-  ctx.stroke();
+  const line = (k, stroke, dash) => {
+    ctx.strokeStyle = stroke; ctx.lineWidth = 1.75; ctx.lineJoin = "round"; ctx.setLineDash(dash);
+    ctx.beginPath();
+    let pen = false;
+    data.forEach((s, i) => {
+      const v = val(s, k);
+      if (Number.isNaN(v)) { pen = false; return; }
+      const vx = xAt(s.t), vy = y(Math.max(-range, Math.min(range, v)));
+      const jump = k === "th" && i > 0 && Math.abs(v - val(data[i - 1], k)) > 180;   // wrap at +-180
+      if (!pen || jump) ctx.moveTo(vx, vy); else ctx.lineTo(vx, vy);
+      pen = true;
+    });
+    ctx.stroke();
+    ctx.setLineDash([]);
+  };
+  line(key, color, []);
+  if (refKey) line(refKey, colors["text-3"], [4, 4]);
 }
 
 function frame() {
   drawViz();
   drawChart($("chartAngle"), "th", [10, 30, 90, 180], colors["accent"]);
-  drawChart($("chartX"), "x", [50, 100, 250, 500], colors["text"]);
+  drawChart($("chartX"), "x", [50, 100, 250, 500], colors["text"], "ref");
+  drawChart($("chartU"), "u", [0.5, 1, 2.5], colors["text-2"]);
   requestAnimationFrame(frame);
 }
 
 // ---------------------------------------------------------------- go
 render();
+renderPicker();
 connect();
 requestAnimationFrame(frame);
