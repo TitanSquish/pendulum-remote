@@ -4,13 +4,13 @@ A standalone remote-control console for the ED2 inverted pendulum, kept separate
 from the main ED2-Repo website so it can be tested without touching the live site.
 
 ```
-Browser (frontend/)  ⇅ WebSocket  bridge/bridge.py (this PC)  ⇅ USB serial  ESP32 #2
+Browser (frontend/)  ⇅ WebSocket  bridge/bridge.py (this PC)  ⇅ USB serial  rig ESP32
 ```
 
 ## Requirements
 
-- Motor ESP32 flashed with **cart_control v10.1** or later (adds the serial
-  commands and online parameters). Encoder ESP32 on v9.2.
+- Rig ESP32 flashed with **cart_single v11.1** or later (`ED2-Repo/cart/cart_single`):
+  experiments, 921600 baud, run data lines.
 - Python 3.10+ and `pip install -r bridge/requirements.txt`
 
 ## Run it
@@ -28,12 +28,16 @@ Open http://localhost:8000, press **Take control**, then **Start**.
 
 ## What the page does
 
-- **Start** homes the cart, then swings the pendulum up and balances it.
+- **Experiment** picker: choose what the next run does (swing-up & balance,
+  rig checks; the Feedback lab experiments arrive in later stages).
+- **Start** homes the cart, measures the hanging pendulum, then runs the experiment.
 - **Stop** (or the **Esc** key) stops the rig. Anyone connected can press it, even without control.
-- **Parameters** can be changed while the rig is idle. The ESP32 enforces every
-  limit itself, so the page can't push it outside a safe range even if bypassed.
-  Gain mode switches between pole placement (one stiffness value) and four manual gains.
-- Live view of the cart and pendulum, angle and cart-position charts, and an activity log.
+- **Parameters** for the selected experiment can be changed while the rig is idle.
+  The ESP32 enforces every limit itself, so the page can't push it outside a safe range even if bypassed.
+- Live view of the cart and pendulum, and angle, cart-position and motor-command charts.
+- **Runs**: every finished run is saved in `runs/` on this PC as CSV and MATLAB
+  `.mat` (`t x theta u ref`, plus `simout = [x theta u t ref]`, `params`, `results`).
+  Download them from the page.
 
 ## Safety built into the bridge
 
@@ -50,24 +54,39 @@ Before putting it online:
 3. Expose it through a tunnel with access control (for example Cloudflare Tunnel
    with Cloudflare Access) rather than opening a port on the router.
 
-## Serial protocol (ESP32 #2, v10.1)
+## Serial protocol (cart_single v11.1, 921600 baud)
 
-One command per line at 115200 baud. Replies start with `ok `, `err `, `param `,
-`params end` or `status `.
+One command per line. Replies start with `ok `, `err `, `param `, `params end`,
+`status `, `exp ` or `io `.
 
 | Command | Effect |
 |---|---|
-| `home` | Start (only while idle) |
+| `exp list` | `exp NAME \| title` per experiment, then `exp end` |
+| `exp select NAME` | Experiment for the next run (idle only) |
+| `run` (or `home`) | Home, measure the hanging reference, run the selected experiment |
 | `stop` | Stop now, also during homing |
-| `status` | `status IDLE`, `HOMING`, `HANG`, `SWING`, `BALANCE`, `BRAKE`, ... |
-| `params` | `param NAME VALUE MIN MAX DEFAULT UNIT \| description` per setting, then `params end` |
+| `status` | `status STATE EXPERIMENT` |
+| `params` | Shared + the selected experiment's settings: `param NAME VALUE MIN MAX DEFAULT UNIT \| description`, then `params end` |
 | `set NAME VALUE` | Change a setting (idle only, within limits) |
 | `defaults` | Restore the firmware defaults |
 
-Telemetry lines (`SWING ...` at 10 Hz, `BAL ...` at 50 Hz) and event lines are
+During a run the board prints `run start NAME K=V ...`, then one
+`D <t_ms> <x_m> <theta_rad> <u_V> <ref>` line per 2 ms step (theta continuous:
+0 = upright, π = hanging; `ref` is `nan` without a setpoint), then
+`run end REASON` (`done`, `stop`, `soft-limit`, `overspeed`, `limit-switch`).
+Human-readable `SWING` / `BAL` / `HANG` lines and `>> STATE` lines are
 documented in `ED2-Repo/docs/esp32.md`.
+
+## Tests
+
+    python -m pip install -r bridge/requirements-dev.txt
+    python -m pytest bridge/tests -q
 
 ## Files
 
-- `bridge/bridge.py`: serial ⇄ WebSocket bridge, control lock, heartbeat watchdog, mock rig
+- `bridge/bridge.py`: serial ⇄ WebSocket bridge, control lock, heartbeat watchdog, run downloads, mock rig
+- `bridge/runs.py`: turns `run start` / `D` / `run end` lines into saved runs (CSV, .mat, .json)
+- `bridge/matfile.py`: small MATLAB Level 5 .mat writer (no SciPy needed to run the bridge)
+- `bridge/tests/`: pytest suite (needs `requirements-dev.txt`)
 - `frontend/`: plain HTML/CSS/JS console (no build step)
+- `runs/`: saved runs (gitignored)
