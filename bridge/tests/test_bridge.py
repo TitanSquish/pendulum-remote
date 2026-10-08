@@ -122,3 +122,43 @@ def test_runs_endpoints(tmp_path, monkeypatch):
     assert client.get("/runs?token=s3cret").status_code == 200
     assert client.get(f"/runs/{csv_name}").status_code == 401
     assert client.get(f"/runs/{csv_name}?token=s3cret").status_code == 200
+
+
+def test_bad_lines_never_stop_recording(tmp_path):
+    b = FakeBridge(tmp_path)
+    b.feed_line("param BAL_POLE 5�� 3 7 5 rad/s | balance stiffness")   # garbled number
+    b.feed_line("SWING th . deg  w 0.1  x 1.0 mm  v 0.0  vr 0.0  E -1  Eend -1  u 0.1")
+    assert b.bad_lines == 2
+    for line in ["run start SwingBal", "D 0 0 3.14 0 nan", "run end stop"]:
+        b.feed_line(line)
+    end = next(m for m in b.pushed if m["kind"] == "run_end")
+    assert end["reason"] == "stop" and end["samples"] == 1
+
+
+def test_save_failure_still_reports_the_run(tmp_path, monkeypatch):
+    def broken(run, folder):
+        raise ValueError("disk said no")
+    monkeypatch.setattr(bridge_mod, "save_run", broken)
+    b = FakeBridge(tmp_path)
+    feed_run(b, n=3)
+    end = next(m for m in b.pushed if m["kind"] == "run_end")
+    assert end["files"] == {} and end["samples"] == 3
+
+
+def test_board_reset_mid_run_saves_the_run(tmp_path):
+    b = FakeBridge(tmp_path)
+    b.feed_line("run start SwingBal")
+    b.feed_line("D 0 0 3.14 0 nan")
+    b.feed_line("=== ESP32 Single-Board Pendulum Controller v11.1-single ===")
+    end = next(m for m in b.pushed if m["kind"] == "run_end")
+    assert end["reason"] == "interrupted" and end["samples"] == 1
+    assert (tmp_path / end["files"]["csv"]).exists()
+
+
+def test_bridge_shutdown_saves_the_open_run(tmp_path):
+    b = FakeBridge(tmp_path)
+    b.feed_line("run start SwingBal")
+    b.feed_line("D 0 0 3.14 0 nan")
+    b.shutdown()
+    end = next(m for m in b.pushed if m["kind"] == "run_end")
+    assert end["reason"] == "bridge-closed" and end["samples"] == 1

@@ -92,6 +92,7 @@ class Bridge:
         self.runs_dir = runs_dir
         self.recorder = Recorder()
         self._n_samples = 0
+        self.bad_lines = 0                 # lines that raised while parsing (noise)
         self.loop: asyncio.AbstractEventLoop | None = None
 
     # --- to browsers ---
@@ -130,10 +131,22 @@ class Bridge:
                 pass
 
     # --- from the board ---
+    def feed_line(self, line: str):
+        """Entry point for every serial line: a garbled line must never stop the reader."""
+        try:
+            self.handle_line(line)
+        except Exception as e:
+            self.bad_lines += 1
+            print(f"[bridge] ignored a bad line ({e!r}): {line[:80]!r}")
+
     def handle_line(self, line: str):
         line = line.strip()
         if not line:
             return
+        if line.startswith("=== ESP32"):              # board rebooted: an open run ends here
+            run = self.recorder.abort("interrupted")
+            if run:
+                self._on_run_event("end", run)
         if line.startswith(("D ", "run start", "run end", "result ")):
             for kind, payload in self.recorder.on_line(line):
                 self._on_run_event(kind, payload)
@@ -211,10 +224,16 @@ class Bridge:
         elif kind == "end":
             try:
                 summary = save_run(payload, self.runs_dir)
-            except OSError as e:
-                print(f"[bridge] could not save the run: {e}")
+            except Exception as e:
+                print(f"[bridge] could not save the run: {e!r}")
                 summary = run_summary(payload, {})
             self.push({"kind": "run_end", **summary})
+
+    def shutdown(self):
+        """The bridge is closing: save whatever the open run recorded."""
+        run = self.recorder.abort("bridge-closed")
+        if run:
+            self._on_run_event("end", run)
 
     def serial_lost(self):
         """The board is gone: keep whatever the open run recorded."""
@@ -339,6 +358,8 @@ class SerialBridge(Bridge):
                 s.open()
             except serial.SerialException:
                 continue
+            if hasattr(s, "set_buffer_size"):          # Windows: default ~4 KB is ~0.16 s of D lines
+                s.set_buffer_size(rx_size=1 << 20)
             if self.port:
                 return s
             # Auto-detect: the rig answers "status"
@@ -370,7 +391,7 @@ class SerialBridge(Bridge):
                     buf += s.read(4096)
                     *lines, buf = buf.split(b"\n")
                     for raw in lines:
-                        self.handle_line(raw.decode("utf-8", errors="replace"))
+                        self.feed_line(raw.decode("utf-8", errors="replace"))
             except serial.SerialException as e:
                 print(f"[bridge] serial lost: {e}")
                 self.ser = None
@@ -433,7 +454,7 @@ class MockBridge(Bridge):
         self.inbox.append(line)
 
     def _emit(self, line: str):
-        self.handle_line(line)
+        self.feed_line(line)
 
     def _visible(self):
         return [p for p in MOCK_PARAMS if p[0] in (None, self.sim_exp)]
@@ -600,6 +621,7 @@ def make_app(bridge: Bridge) -> FastAPI:
         task = asyncio.ensure_future(bridge.watchdog())
         yield
         task.cancel()
+        bridge.shutdown()
 
     app = FastAPI(lifespan=lifespan)
 
