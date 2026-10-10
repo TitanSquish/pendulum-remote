@@ -204,6 +204,8 @@ class Bridge:
                 self.push({"kind": "event", "text": line, "t": time.time()})
             if line.startswith(STATUS_REFRESH) or "aborted" in line:
                 self.send_line("status")
+            if line.startswith("run end"):
+                self.send_line("params")     # a run can change settings (Friction saves its result)
         self.push({"kind": "log", "text": line})
 
     def _on_run_event(self, kind: str, payload):
@@ -411,6 +413,8 @@ class SerialBridge(Bridge):
 # Simulated rig (same lines as the firmware) for building the frontend
 # ----------------------------------------------------------------------------
 MOCK_EXPERIMENTS = [("SwingBal", "Swing-up & balance"),
+                    ("FreeSwing", "Pendulum free swing (Ex. 1)"),
+                    ("Friction", "Static friction (Ex. 3)"),
                     ("SignCheck", "Sign check (motor off)"),
                     ("StepTest", "Speed loop step test")]
 # Mirrors PARAMS in cart_single.ino v11.1: (experiment or None = shared, name, default, lo, hi, unit, desc)
@@ -432,8 +436,13 @@ MOCK_PARAMS = [
     (None, "KV_P", 1.5, 0.5, 3, "1/(m/s)", "speed loop gain"),
     (None, "V_FF", 0.25, 0.1, 0.5, "1/(m/s)", "speed loop feed-forward"),
     (None, "V_MAX", 0.8, 0.2, 1.0, "m/s", "top cart speed"),
+    ("Friction", "FRIC_POS_V", 0.5556, 0, 1.5, "V", "breakaway command driving right (+x)"),
+    ("Friction", "FRIC_NEG_V", 0.4167, 0, 1.5, "V", "breakaway command driving left (-x)"),
+    ("FreeSwing", "FS_DURATION_S", 30, 5, 180, "s", "how long to record the free swing"),
+    ("Friction", "FR_RAMP_VPS", 0.5, 0.1, 2.0, "V/s", "how fast the motor command ramps up"),
 ]
-MOCK_RUN_STATE = {"SwingBal": "SWING", "SignCheck": "CHECK", "StepTest": "STEP"}
+MOCK_RUN_STATE = {"SwingBal": "SWING", "FreeSwing": "FREE", "Friction": "FRICTION",
+                  "SignCheck": "CHECK", "StepTest": "STEP"}
 
 
 class MockBridge(Bridge):
@@ -543,6 +552,14 @@ class MockBridge(Bridge):
         if s == "STEP":
             u = 0.6 if int(t / 0.6) % 2 == 0 else -0.6
             return 0.09 * math.sin(math.pi * t / 0.6), math.pi + 0.05 * math.sin(5.6 * t), u
+        if s == "FREE":                                             # released from 60 deg, decaying
+            return 0.0, math.pi + math.radians(60) * math.exp(-0.02 * t) * math.cos(5.6 * t), 0.0
+        if s == "FRICTION":                                         # ramp right 0-1.6 s, settle, ramp left
+            if t < 1.6:
+                return (0.001 if t > 1.4 else 0.0), math.pi, 0.5 * t
+            if t < 2.6:
+                return 0.001, math.pi, 0.0
+            return (0.0 if t > 3.8 else 0.001), math.pi, -0.5 * (t - 2.6)
         return 0.0, math.pi + 0.1 * math.sin(5.6 * t), 0.0        # CHECK: motor off
 
     def _begin_run(self, now: float):
@@ -574,11 +591,21 @@ class MockBridge(Bridge):
             elif s == "SWING" and t > 7:
                 self._emit(">> BALANCE")
                 self._goto("BALANCE", now)
+            elif s == "FREE" and t > self.vals["FS_DURATION_S"]:
+                self._emit("run end done")
+                self._goto("IDLE", now)
+            elif s == "FRICTION" and t > 4.0:
+                self._emit("result friction_pos_V 0.700")
+                self._emit("result friction_neg_V 0.600")
+                self.vals["FRIC_POS_V"], self.vals["FRIC_NEG_V"] = 0.7, 0.6
+                self._emit("Friction compensation saved: +0.700 V / -0.600 V")
+                self._emit("run end done")
+                self._goto("IDLE", now)
             elif s == "STEP" and t > 3.6:
                 self._emit("Step test done.")
                 self._emit("run end done")
                 self._goto("IDLE", now)
-            if self.sim_state in ("SWING", "BALANCE", "STEP", "CHECK"):
+            if self.sim_state in ("SWING", "BALANCE", "STEP", "CHECK", "FREE", "FRICTION"):
                 while self.next_d <= now:            # 500 Hz, like the firmware
                     x, th, u = self._sample(self.next_d - self.t0)
                     self._emit(f"D {int((self.next_d - self.run_t0) * 1000)} {x:.4f} {th:.4f} {u:.3f} nan")

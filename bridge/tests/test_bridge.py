@@ -162,3 +162,11 @@ def test_bridge_shutdown_saves_the_open_run(tmp_path):
     b.shutdown()
     end = next(m for m in b.pushed if m["kind"] == "run_end")
     assert end["reason"] == "bridge-closed" and end["samples"] == 1
+
+
+def test_settings_are_refreshed_after_a_run(tmp_path):
+    # An experiment can change settings during a run (Friction saves the measured
+    # compensation), so the console must not keep showing the old values.
+    b = FakeBridge(tmp_path)
+    feed_run(b, n=1, end="run end done")
+    assert "params" in b.lines

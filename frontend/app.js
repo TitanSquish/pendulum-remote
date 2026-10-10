@@ -16,6 +16,9 @@ const STATES = {
   BRAKE:   ["Braking", "The cart reached the software limit and is stopping."],
   STEP:    ["Step test", "Moving the cart back and forth to test the speed loop."],
   CHECK:   ["Sign check", "Motor off. Move the cart and pendulum by hand and check the readings."],
+  FREE:    ["Free swing", "Motor off. Lift the pendulum and let it go: the swing is being recorded."],
+  FRICTION: ["Measuring friction", "Slowly raising the motor command until the cart moves, right then left."],
+  RUN:     ["Running", "The selected experiment is running."],
   DONE:    ["Test finished", "Motor off."],
   DAC:     ["Pi control", "The Raspberry Pi is driving the motor."],
 };
@@ -33,6 +36,10 @@ const EXP_GROUPS = [
 const EXP_INFO = {
   SwingBal: ["Swings the pendulum up from hanging and balances it upright.",
              "The cart will home to both ends, then swing the pendulum up and balance it without further input. Make sure the track is clear."],
+  FreeSwing: ["Motor off. Records the pendulum swinging freely after you lift it and let go (Feedback exercise 1).",
+              "The cart will home to both ends, then the motor turns off. When it says Free swing, lift the pendulum to one side and let it go."],
+  Friction: ["Ramps the motor slowly until the cart moves, both ways. The results become the friction compensation (Feedback exercise 3).",
+             "The cart will home to both ends, then creep a few millimetres right and then left while the motor command ramps up."],
   SignCheck: ["Motor off after homing. Shows angle and position so the sign conventions can be checked by hand.",
               "The cart will home to both ends, then the motor turns off. Move the cart and pendulum by hand and check the readings."],
   StepTest: ["Moves the cart back and forth at a fixed speed to test the speed loop.",
@@ -45,6 +52,7 @@ const GROUPS = [
                               "CATCH_ANGLE_DEG", "CATCH_RATE", "DROP_ANGLE_DEG"] },
   { title: "Swing-up", names: ["SWING_V", "SWING_E_TARGET", "SWING_E_SLOW", "SWING_PHASE_DEG", "K_X_SWING"] },
   { title: "Cart speed loop", names: ["KV_P", "V_FF", "V_MAX"] },
+  { title: "Friction compensation", names: ["FRIC_POS_V", "FRIC_NEG_V"] },
 ];
 const LABELS = {
   BAL_MODE: "Gain mode",
@@ -64,6 +72,10 @@ const LABELS = {
   KV_P: "Speed loop gain",
   V_FF: "Feed-forward",
   V_MAX: "Top speed",
+  FS_DURATION_S: "Recording time",
+  FR_RAMP_VPS: "Ramp rate",
+  FRIC_POS_V: "Breakaway, driving right",
+  FRIC_NEG_V: "Breakaway, driving left",
 };
 // Help text shown under each field (the board's own descriptions are terser)
 const HELP = {
@@ -83,6 +95,10 @@ const HELP = {
   KV_P: "How hard the motor corrects speed errors.",
   V_FF: "Motor command per m/s of target speed.",
   V_MAX: "Speed limit for the cart.",
+  FS_DURATION_S: "How long to record after the motor turns off.",
+  FR_RAMP_VPS: "Slower is more accurate. 0.5 V/s takes about 2 s per direction.",
+  FRIC_POS_V: "Measured by this experiment and saved on the rig. Used to overcome friction.",
+  FRIC_NEG_V: "Measured by this experiment and saved on the rig. Used to overcome friction.",
 };
 const MANUAL_ONLY = new Set(["BAL_K_TH", "BAL_K_THD", "BAL_K_X", "BAL_K_V"]);
 const POLE_ONLY = new Set(["BAL_POLE"]);
@@ -194,7 +210,8 @@ function onMessage(m) {
 }
 
 function setState(s, quiet) {
-  if (!STATES[s]) s = s === "STEP TEST" ? "STEP" : "IDLE";
+  // A state this console doesn't know is still a running rig: never show "Ready"
+  if (!STATES[s]) s = s === "STEP TEST" ? "STEP" : "RUN";
   if (s === app.state) return;
   app.state = s;
   if (!quiet && s !== "OFFLINE") addEvent(STATES[s][0], s === "BALANCE" ? "good" : s === "BRAKE" ? "bad" : "");
