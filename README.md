@@ -28,8 +28,10 @@ Open http://localhost:8000, press **Take control**, then **Start**.
 
 ## What the page does
 
-- **Experiment** picker: choose what the next run does (swing-up & balance,
-  rig checks; the Feedback lab experiments arrive in later stages).
+- **Experiment** picker: choose what the next run does: swing-up & balance,
+  pendulum free swing (Feedback ex. 1), static friction (ex. 3; its results are
+  saved on the rig as the friction compensation), and rig checks. The other
+  Feedback experiments arrive in later stages.
 - **Start** homes the cart, measures the hanging pendulum, then runs the experiment.
 - **Stop** (or the **Esc** key) stops the rig. Anyone connected can press it, even without control.
 - **Parameters** for the selected experiment can be changed while the rig is idle.
