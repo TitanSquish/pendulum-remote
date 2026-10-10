@@ -1,0 +1,6 @@
+# Pendulum Lab remote console: runtime dependencies for bridge/bridge.py
+#   python -m pip install -r requirements.txt
+# Tests: python -m pip install -r bridge/requirements-dev.txt
+fastapi>=0.110
+uvicorn[standard]>=0.29   # [standard] adds the WebSocket library the console needs
+pyserial>=3.5
